@@ -38,6 +38,7 @@ import comfy.ldm.hydit.controlnet
 import comfy.ldm.flux.controlnet
 import comfy.ldm.qwen_image.controlnet
 import comfy.cldm.dit_embedder
+import comfy.ldm.lumina.z_image_controlnet
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from comfy.hooks import HookGroup
@@ -605,6 +606,81 @@ def load_controlnet_qwen_instantx(sd, model_options={}):
     control = ControlNet(control_model, compression_ratio=1, latent_format=latent_format, concat_mask=concat_mask, load_device=load_device, manual_cast_dtype=manual_cast_dtype, extra_conds=extra_conds)
     return control
 
+
+def load_controlnet_z_image(sd, model_options={}):
+    """Load Z-Image ControlNet model."""
+    # Determine model configuration from state dict
+    unet_dtype = model_options.get("dtype", None)
+    if unet_dtype is None:
+        weight_dtype = comfy.utils.weight_dtype(sd)
+        supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
+        unet_dtype = comfy.model_management.unet_dtype(model_params=-1, supported_dtypes=supported_inference_dtypes, weight_dtype=weight_dtype)
+
+    load_device = comfy.model_management.get_torch_device()
+    manual_cast_dtype = comfy.model_management.unet_manual_cast(unet_dtype, load_device)
+    offload_device = comfy.model_management.unet_offload_device()
+
+    operations = model_options.get("custom_operations", None)
+    if operations is None:
+        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, disable_fast_fp8=True)
+
+    # Z-Image specific configuration
+    # Detect configuration from state dict
+    dim = 3840  # Default Z-Image dim
+    if "control_x_embedder.weight" in sd:
+        dim = sd["control_x_embedder.weight"].shape[0]
+
+    # Count control layers
+    n_control_layers = 0
+    while f"control_layers.{n_control_layers}.transformer_block.attention.qkv.weight" in sd:
+        n_control_layers += 1
+
+    # Count refiner layers
+    n_refiner_layers = 0
+    while f"control_noise_refiner.{n_refiner_layers}.attention.qkv.weight" in sd:
+        n_refiner_layers += 1
+    if n_refiner_layers == 0:
+        n_refiner_layers = 2  # default
+
+    # Get control input channels
+    control_in_channels = 16  # default
+    if "control_x_embedder.weight" in sd:
+        # weight shape is [dim, patch_size * patch_size * in_channels]
+        in_features = sd["control_x_embedder.weight"].shape[1]
+        patch_size = 2
+        control_in_channels = in_features // (patch_size * patch_size)
+
+    control_model = comfy.ldm.lumina.z_image_controlnet.ZImageControlNet(
+        patch_size=2,
+        in_channels=16,
+        dim=dim,
+        n_layers=30,  # main model layers
+        n_refiner_layers=n_refiner_layers,
+        n_heads=30,
+        n_kv_heads=30,
+        multiple_of=256,
+        ffn_dim_multiplier=(8.0 / 3.0),
+        norm_eps=1e-5,
+        qk_norm=True,
+        cap_feat_dim=2560,
+        axes_dims=[32, 48, 48],
+        axes_lens=[1536, 512, 512],
+        rope_theta=256.0,
+        time_scale=1000.0,
+        pad_tokens_multiple=32,
+        control_in_channels=control_in_channels,
+        device=offload_device,
+        dtype=unet_dtype,
+        operations=operations,
+    )
+
+    control_model = controlnet_load_state_dict(control_model, sd)
+
+    latent_format = comfy.latent_formats.Flux()
+    extra_conds = []
+    control = ControlNet(control_model, compression_ratio=1, latent_format=latent_format, load_device=load_device, manual_cast_dtype=manual_cast_dtype, extra_conds=extra_conds)
+    return control
+
 def convert_mistoline(sd):
     return comfy.utils.state_dict_prefix_replace(sd, {"single_controlnet_blocks.": "controlnet_single_blocks."})
 
@@ -616,6 +692,10 @@ def load_controlnet_state_dict(state_dict, model=None, model_options={}):
 
     if "lora_controlnet" in controlnet_data:
         return ControlLora(controlnet_data, model_options=model_options)
+
+    # Z-Image ControlNet detection
+    if "control_x_embedder.weight" in controlnet_data and "control_layers.0.transformer_block.attention.qkv.weight" in controlnet_data:
+        return load_controlnet_z_image(controlnet_data, model_options=model_options)
 
     controlnet_config = None
     supported_inference_dtypes = None

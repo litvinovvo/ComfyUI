@@ -626,16 +626,29 @@ def load_controlnet_z_image(state_dict, model_options={}):
         hidden_dim = state_dict['control_layers.0.feed_forward.w1.weight'].shape[0]
         ffn_dim_multiplier = hidden_dim / dim
     
+    # Detect control_in_dim from checkpoint weights
+    control_in_dim = None
+    if 'control_all_x_embedder.2-1.weight' in state_dict:
+        # Extract input dim from control embedder weight shape
+        # weight shape is [out_dim, in_dim] where in_dim = patch_size^2 * f_patch_size * control_in_dim
+        # For patch_size=2, f_patch_size=1: in_dim = 4 * control_in_dim
+        embedder_in_dim = state_dict['control_all_x_embedder.2-1.weight'].shape[1]
+        control_in_dim = embedder_in_dim // 4  # Assuming patch_size=2, f_patch_size=1
+    
     control_model = comfy.ldm.z_image.controlnet.ZImageControlNet(
         dim=dim,
         ffn_dim_multiplier=ffn_dim_multiplier,
+        control_in_dim=control_in_dim,
         device=comfy.model_management.unet_offload_device(),
         dtype=unet_dtype
     )
     
     control_model.load_state_dict(state_dict, strict=False)
     
-    control = ControlNet(control_model, load_device=load_device, manual_cast_dtype=manual_cast_dtype)
+    # Set latent_format to enable automatic VAE encoding in ControlNetApplyAdvanced
+    latent_format = comfy.latent_formats.Wan21()
+    
+    control = ControlNet(control_model, compression_ratio=1, latent_format=latent_format, load_device=load_device, manual_cast_dtype=manual_cast_dtype)
     return control
 
 

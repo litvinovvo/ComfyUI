@@ -228,8 +228,8 @@ class ZImageControlNet(nn.Module):
         x: torch.Tensor,
         timesteps: torch.Tensor,
         context: torch.Tensor,
-        num_tokens: int,
         hint: torch.Tensor,
+        y=None,
         attention_mask: torch.Tensor = None,
         **kwargs
     ):
@@ -240,14 +240,17 @@ class ZImageControlNet(nn.Module):
             x: Noisy latent input [B, C, H, W]
             timesteps: Diffusion timesteps [B]
             context: Text embeddings from CLIP/text encoder
-            num_tokens: Number of context tokens
             hint: Control image latents [B, C, H, W]
+            y: Optional additional conditioning (unused)
             attention_mask: Optional attention mask
 
         Returns:
             Dictionary with 'input' key containing control signals for main model layers
         """
         transformer_options = kwargs.get("transformer_options", {})
+
+        # Derive num_tokens from context shape
+        num_tokens = context.shape[1] if context is not None else 0
 
         # Timestep embedding
         t = (1.0 - timesteps) * self.time_scale

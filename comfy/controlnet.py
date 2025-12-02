@@ -611,7 +611,7 @@ def convert_mistoline(sd):
 
 
 def load_controlnet_z_image(sd, model_options={}):
-    """Load Z-Image ControlNet model."""
+    """Load Z-Image ControlNet model based on VideoX-Fun implementation."""
     load_device = comfy.model_management.get_torch_device()
     offload_device = comfy.model_management.unet_offload_device()
     unet_dtype = comfy.model_management.unet_dtype(model_params=-1)
@@ -626,7 +626,6 @@ def load_controlnet_z_image(sd, model_options={}):
     n_refiner_layers = 2
     dim = 3840
     n_heads = 30
-    n_kv_heads = 30
     control_layers_interval = 2
 
     # Count control layers from checkpoint
@@ -642,21 +641,14 @@ def load_controlnet_z_image(sd, model_options={}):
 
     control_model = comfy.ldm.z_image.controlnet.ZImageControlTransformer2DModel(
         patch_size=2,
+        f_patch_size=1,
         in_channels=16,
         dim=dim,
         n_layers=n_layers,
         n_refiner_layers=n_refiner_layers,
         n_heads=n_heads,
-        n_kv_heads=n_kv_heads,
-        multiple_of=256,
-        ffn_dim_multiplier=(8.0 / 3.0),
         norm_eps=1e-5,
         qk_norm=True,
-        cap_feat_dim=2560,
-        axes_dims=[32, 48, 48],
-        axes_lens=[1536, 512, 512],
-        rope_theta=256.0,
-        time_scale=1000.0,
         control_layers_interval=control_layers_interval,
         num_control_layers=num_control_layers,
         device=offload_device,

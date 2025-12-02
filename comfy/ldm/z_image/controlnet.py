@@ -172,14 +172,10 @@ class ZImageControlTransformerBlock(nn.Module):
 
     def forward(self, c, x=None, attn_mask=None, freqs_cis=None, adaln_input=None):
         # For control blocks: c is control, x is the latent from main model
-        if self.block_id == 0:
+        if self.block_id == 0 and hasattr(self, 'before_proj'):
             c = self.before_proj(c)
             if x is not None:
                 c = c + x
-            all_c = []
-        else:
-            all_c = list(torch.unbind(c))
-            c = all_c.pop(-1)
 
         # Standard transformer forward
         if self.modulation and adaln_input is not None:
@@ -196,10 +192,9 @@ class ZImageControlTransformerBlock(nn.Module):
             c = c + self.attention_norm2(attn_out)
             c = c + self.ffn_norm2(self.feed_forward(self.ffn_norm1(c)))
 
-        c_skip = self.after_proj(c)
-        all_c += [c_skip, c]
-        c = torch.stack(all_c)
-        return c
+        # Return both the hidden state and the hint (after_proj output)
+        hint = self.after_proj(c)
+        return c, hint
 
 
 class ZImageControlNoiseRefinerBlock(nn.Module):
@@ -406,12 +401,12 @@ class ZImageControlTransformer2DModel(nn.Module):
             control_embed = layer(control_embed, attn_mask=None, freqs_cis=None, adaln_input=adaln_input)
 
         # Generate control hints through control layers with timestep conditioning
+        # Each control layer returns (hidden_state, hint) where hint is the after_proj output
         ctrl = control_embed
+        hints = []
         for layer in self.control_layers:
-            ctrl = layer(ctrl, x=None, attn_mask=None, freqs_cis=None, adaln_input=adaln_input)
-
-        # Extract control hints (all but the last element from the stack)
-        hints = list(torch.unbind(ctrl))[:-1]
+            ctrl, hint = layer(ctrl, x=None, attn_mask=None, freqs_cis=None, adaln_input=adaln_input)
+            hints.append(hint)
 
         # Map to main model layers
         out_input = []

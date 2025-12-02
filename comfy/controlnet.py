@@ -37,6 +37,7 @@ import comfy.cldm.mmdit
 import comfy.ldm.hydit.controlnet
 import comfy.ldm.flux.controlnet
 import comfy.ldm.qwen_image.controlnet
+import comfy.ldm.z_image.controlnet
 import comfy.cldm.dit_embedder
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -609,6 +610,70 @@ def convert_mistoline(sd):
     return comfy.utils.state_dict_prefix_replace(sd, {"single_controlnet_blocks.": "controlnet_single_blocks."})
 
 
+def load_controlnet_z_image(sd, model_options={}):
+    """Load Z-Image ControlNet model."""
+    load_device = comfy.model_management.get_torch_device()
+    offload_device = comfy.model_management.unet_offload_device()
+    unet_dtype = comfy.model_management.unet_dtype(model_params=-1)
+    manual_cast_dtype = comfy.model_management.unet_manual_cast(unet_dtype, load_device)
+
+    operations = model_options.get("custom_operations", None)
+    if operations is None:
+        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, disable_fast_fp8=True)
+
+    # Detect model configuration from state dict
+    n_layers = 30  # Default for Z-Image
+    n_refiner_layers = 2
+    dim = 3840
+    n_heads = 30
+    n_kv_heads = 30
+    control_layers_interval = 2
+
+    # Count control layers to determine configuration
+    control_layer_count = 0
+    for key in sd.keys():
+        if key.startswith("control_layers.") and ".after_proj." in key:
+            idx = int(key.split(".")[1])
+            control_layer_count = max(control_layer_count, idx + 1)
+
+    control_model = comfy.ldm.z_image.controlnet.ZImageControlTransformer2DModel(
+        patch_size=2,
+        in_channels=16,
+        dim=dim,
+        n_layers=n_layers,
+        n_refiner_layers=n_refiner_layers,
+        n_heads=n_heads,
+        n_kv_heads=n_kv_heads,
+        multiple_of=256,
+        ffn_dim_multiplier=(8.0 / 3.0),
+        norm_eps=1e-5,
+        qk_norm=True,
+        cap_feat_dim=2560,
+        axes_dims=[32, 48, 48],
+        axes_lens=[1536, 512, 512],
+        rope_theta=256.0,
+        time_scale=1000.0,
+        control_layers_interval=control_layers_interval,
+        device=offload_device,
+        dtype=unet_dtype,
+        operations=operations,
+    )
+
+    control_model = controlnet_load_state_dict(control_model, sd)
+
+    latent_format = comfy.latent_formats.Flux()
+    extra_conds = []
+    control = ControlNet(
+        control_model,
+        compression_ratio=1,
+        latent_format=latent_format,
+        load_device=load_device,
+        manual_cast_dtype=manual_cast_dtype,
+        extra_conds=extra_conds,
+    )
+    return control
+
+
 def load_controlnet_state_dict(state_dict, model=None, model_options={}):
     controlnet_data = state_dict
     if 'after_proj_list.18.bias' in controlnet_data.keys(): #Hunyuan DiT
@@ -685,6 +750,9 @@ def load_controlnet_state_dict(state_dict, model=None, model_options={}):
 
     elif "controlnet_blocks.0.linear.weight" in controlnet_data: #mistoline flux
         return load_controlnet_flux_xlabs_mistoline(convert_mistoline(controlnet_data), mistoline=True, model_options=model_options)
+
+    elif "control_layers.0.after_proj.weight" in controlnet_data: #Z-Image ControlNet
+        return load_controlnet_z_image(controlnet_data, model_options=model_options)
 
     pth_key = 'control_model.zero_convs.0.0.weight'
     pth = False

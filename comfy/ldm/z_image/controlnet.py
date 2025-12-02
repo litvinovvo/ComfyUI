@@ -4,9 +4,42 @@
 
 from __future__ import annotations
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class ZImageControlTimestepEmbedder(nn.Module):
+    """Timestep embedder for Z-Image ControlNet."""
+    def __init__(self, out_size, mid_size=None, frequency_embedding_size=256, device=None, dtype=None, operations=None):
+        super().__init__()
+        if mid_size is None:
+            mid_size = out_size
+        self.mlp = nn.Sequential(
+            operations.Linear(frequency_embedding_size, mid_size, bias=True, device=device, dtype=dtype),
+            nn.SiLU(),
+            operations.Linear(mid_size, out_size, bias=True, device=device, dtype=dtype),
+        )
+        self.frequency_embedding_size = frequency_embedding_size
+
+    @staticmethod
+    def timestep_embedding(t, dim, max_period=10000):
+        half = dim // 2
+        freqs = torch.exp(
+            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32, device=t.device) / half
+        )
+        args = t[:, None].float() * freqs[None]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if dim % 2:
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+        return embedding
+
+    def forward(self, t, dtype=None):
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        if dtype is not None:
+            t_freq = t_freq.to(dtype)
+        return self.mlp(t_freq)
 
 
 class ZImageControlRMSNorm(nn.Module):
@@ -239,6 +272,7 @@ class ZImageControlTransformer2DModel(nn.Module):
         qk_norm: bool = True,
         control_layers_interval: int = 2,
         num_control_layers: int = 15,
+        t_scale: float = 1000.0,
         image_model: str = None,
         device=None,
         dtype=None,
@@ -255,6 +289,16 @@ class ZImageControlTransformer2DModel(nn.Module):
         self.n_heads = n_heads
         self.n_layers = n_layers
         self.num_control_layers = num_control_layers
+        self.t_scale = t_scale
+
+        # Timestep embedder - matches VideoX-Fun t_embedder
+        self.t_embedder = ZImageControlTimestepEmbedder(
+            out_size=min(dim, 256),
+            mid_size=1024,
+            device=device,
+            dtype=dtype,
+            operations=operations,
+        )
 
         # Control layer positions
         self.control_layers_places = [i for i in range(0, n_layers, control_layers_interval)][:num_control_layers]
@@ -321,7 +365,7 @@ class ZImageControlTransformer2DModel(nn.Module):
 
         Args:
             x: Noisy latent tensor [B, C, H, W]
-            timesteps: Diffusion timesteps (not used directly, passed through main model)
+            timesteps: Diffusion timesteps
             context: Text embeddings (not used directly)
             hint: Control image latents [B, C, H, W]
             attention_mask: Optional attention mask
@@ -334,6 +378,12 @@ class ZImageControlTransformer2DModel(nn.Module):
         pH = pW = self.patch_size
         pF = self.f_patch_size
 
+        # Process timesteps to get adaln_input (adaptive layer norm input)
+        # VideoX-Fun uses t_scale=1000.0 and then passes through t_embedder
+        # For flow matching, timesteps are typically in [0, 1], need to convert
+        t = (1.0 - timesteps) * self.t_scale
+        adaln_input = self.t_embedder(t, dtype=hint.dtype)
+
         # Patchify control hint
         hint_patched = hint.view(bs, c, h // pH, pH, w // pW, pW)
         hint_patched = hint_patched.permute(0, 2, 4, 3, 5, 1).reshape(bs, (h // pH) * (w // pW), pF * pH * pW * c)
@@ -342,17 +392,17 @@ class ZImageControlTransformer2DModel(nn.Module):
         embedder_key = f"{self.patch_size}-{self.f_patch_size}"
         control_embed = self.control_all_x_embedder[embedder_key](hint_patched)
 
-        # Process through control noise refiner (simplified - no full patchify pipeline)
+        # Process through control noise refiner with timestep conditioning
         for layer in self.control_noise_refiner:
-            control_embed = layer(control_embed, attn_mask=None, freqs_cis=None, adaln_input=None)
+            control_embed = layer(control_embed, attn_mask=None, freqs_cis=None, adaln_input=adaln_input)
 
-        # Generate control hints through control layers
-        c = control_embed
+        # Generate control hints through control layers with timestep conditioning
+        ctrl = control_embed
         for layer in self.control_layers:
-            c = layer(c, x=None, attn_mask=None, freqs_cis=None, adaln_input=None)
+            ctrl = layer(ctrl, x=None, attn_mask=None, freqs_cis=None, adaln_input=adaln_input)
 
         # Extract control hints (all but the last element from the stack)
-        hints = list(torch.unbind(c))[:-1]
+        hints = list(torch.unbind(ctrl))[:-1]
 
         # Map to main model layers
         out_input = []

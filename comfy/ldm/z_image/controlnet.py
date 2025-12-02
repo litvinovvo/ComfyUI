@@ -303,10 +303,20 @@ class ZImageControlTransformer2DModel(nn.Module):
         # Control layer positions
         self.control_layers_places = [i for i in range(0, n_layers, control_layers_interval)][:num_control_layers]
 
+        # Control input embedder - Also add alias for checkpoint compatibility
+        embed_dim = f_patch_size * patch_size * patch_size * in_channels
+        self.control_x_embedder = operations.Linear(
+            embed_dim,
+            dim,
+            bias=True,
+            device=device,
+            dtype=dtype,
+        )
+
         # Control input embedder - ModuleDict to match VideoX-Fun structure
         self.control_all_x_embedder = nn.ModuleDict({
             f"{patch_size}-{f_patch_size}": operations.Linear(
-                f_patch_size * patch_size * patch_size * in_channels,
+                embed_dim,
                 dim,
                 bias=True,
                 device=device,
@@ -388,9 +398,8 @@ class ZImageControlTransformer2DModel(nn.Module):
         hint_patched = hint.view(bs, c, h // pH, pH, w // pW, pW)
         hint_patched = hint_patched.permute(0, 2, 4, 3, 5, 1).reshape(bs, (h // pH) * (w // pW), pF * pH * pW * c)
 
-        # Embed control
-        embedder_key = f"{self.patch_size}-{self.f_patch_size}"
-        control_embed = self.control_all_x_embedder[embedder_key](hint_patched)
+        # Embed control using control_x_embedder (matches checkpoint naming)
+        control_embed = self.control_x_embedder(hint_patched)
 
         # Process through control noise refiner with timestep conditioning
         for layer in self.control_noise_refiner:

@@ -627,28 +627,41 @@ def load_controlnet_z_image(sd, model_options={}):
     # Z-Image specific configuration
     # Detect configuration from state dict
     dim = 3840  # Default Z-Image dim
-    if "control_x_embedder.weight" in sd:
-        dim = sd["control_x_embedder.weight"].shape[0]
+
+    # Find control_all_x_embedder key to get dim
+    for key in sd.keys():
+        if key.startswith("control_all_x_embedder.") and key.endswith(".weight"):
+            dim = sd[key].shape[0]
+            break
 
     # Count control layers
     n_control_layers = 0
-    while f"control_layers.{n_control_layers}.transformer_block.attention.qkv.weight" in sd:
+    while f"control_layers.{n_control_layers}.after_proj.weight" in sd:
         n_control_layers += 1
 
-    # Count refiner layers
+    # Count refiner layers - check different possible key formats
     n_refiner_layers = 0
+    # Try diffusers-style attention key first
     while f"control_noise_refiner.{n_refiner_layers}.attention.qkv.weight" in sd:
         n_refiner_layers += 1
+    # If not found, try checking for other attention formats
+    if n_refiner_layers == 0:
+        while f"control_noise_refiner.{n_refiner_layers}.attn.qkv.weight" in sd:
+            n_refiner_layers += 1
     if n_refiner_layers == 0:
         n_refiner_layers = 2  # default
 
-    # Get control input channels
+    # Get control input channels from control_all_x_embedder
     control_in_channels = 16  # default
-    if "control_x_embedder.weight" in sd:
-        # weight shape is [dim, patch_size * patch_size * in_channels]
-        in_features = sd["control_x_embedder.weight"].shape[1]
-        patch_size = 2
-        control_in_channels = in_features // (patch_size * patch_size)
+    for key in sd.keys():
+        if key.startswith("control_all_x_embedder.") and key.endswith(".weight"):
+            # weight shape is [dim, patch_size * patch_size * f_patch_size * in_channels]
+            in_features = sd[key].shape[1]
+            # Assuming patch_size=2, f_patch_size=1
+            patch_size = 2
+            f_patch_size = 1
+            control_in_channels = in_features // (patch_size * patch_size * f_patch_size)
+            break
 
     control_model = comfy.ldm.lumina.z_image_controlnet.ZImageControlNet(
         patch_size=2,
@@ -694,7 +707,13 @@ def load_controlnet_state_dict(state_dict, model=None, model_options={}):
         return ControlLora(controlnet_data, model_options=model_options)
 
     # Z-Image ControlNet detection
-    if "control_x_embedder.weight" in controlnet_data and "control_layers.0.transformer_block.attention.qkv.weight" in controlnet_data:
+    # Check for control_all_x_embedder with patch size format (e.g., "2-1") or control_layers with after_proj
+    z_image_detected = False
+    for key in controlnet_data.keys():
+        if key.startswith("control_all_x_embedder.") and ".weight" in key:
+            z_image_detected = True
+            break
+    if z_image_detected and "control_layers.0.after_proj.weight" in controlnet_data:
         return load_controlnet_z_image(controlnet_data, model_options=model_options)
 
     controlnet_config = None

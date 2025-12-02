@@ -158,14 +158,19 @@ class ZImageControlNet(nn.Module):
         # Control input channels (same as main model by default)
         self.control_in_channels = control_in_channels if control_in_channels is not None else in_channels
 
-        # Control x embedder
-        self.control_x_embedder = operation_settings.get("operations").Linear(
-            in_features=patch_size * patch_size * self.control_in_channels,
+        # Control x embedder - use ModuleDict with patch size format keys (e.g., "2-1")
+        # This matches the reference implementation: control_all_x_embedder
+        f_patch_size = 1  # Default for Z-Image
+        control_all_x_embedder = {}
+        x_embedder = operation_settings.get("operations").Linear(
+            in_features=f_patch_size * patch_size * patch_size * self.control_in_channels,
             out_features=dim,
             bias=True,
             device=operation_settings.get("device"),
             dtype=operation_settings.get("dtype"),
         )
+        control_all_x_embedder[f"{patch_size}-{f_patch_size}"] = x_embedder
+        self.control_all_x_embedder = nn.ModuleDict(control_all_x_embedder)
 
         # Timestep embedder
         self.t_embedder = TimestepEmbedder(min(dim, 1024), output_size=256, **operation_settings)
@@ -258,10 +263,11 @@ class ZImageControlNet(nn.Module):
         # Patchify and embed control input
         B, C, H, W = hint.shape
         H_tokens, W_tokens = H // patch_size, W // patch_size
+        f_patch_size = 1  # Default for Z-Image
 
         hint_patches = hint.view(B, C, H // patch_size, patch_size, W // patch_size, patch_size)
         hint_patches = hint_patches.permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2)
-        control_context = self.control_x_embedder(hint_patches)
+        control_context = self.control_all_x_embedder[f"{patch_size}-{f_patch_size}"](hint_patches)
 
         # Pad control context tokens
         if self.pad_tokens_multiple is not None:

@@ -601,11 +601,12 @@ class ZImageControlNet(nn.Module):
         x_emb[torch.cat(x_inner_pad_mask)] = self.x_pad_token
         x_emb = list(x_emb.split(x_item_seqlens, dim=0))
         
-        # RoPE
-        x_pos_ids_cat = torch.cat(x_pos_ids, dim=0)
-        # EmbedND expects [batch, seq, axes], so add batch dim and then extract
-        x_freqs_cis = self.rope_embedder(x_pos_ids_cat.unsqueeze(0))[0]
-        x_freqs_cis = list(x_freqs_cis.split(x_item_seqlens, dim=0))
+        # RoPE - process each batch item separately
+        x_freqs_cis = []
+        for pos_ids in x_pos_ids:
+            # EmbedND expects [batch, seq, axes]
+            freqs = self.rope_embedder(pos_ids.unsqueeze(0))[0]
+            x_freqs_cis.append(freqs)
         
         # Pad sequence
         x_emb_padded = pad_sequence(x_emb, batch_first=True, padding_value=0.0)
@@ -630,10 +631,12 @@ class ZImageControlNet(nn.Module):
         cap_item_seqlens = [len(_) for _ in cap_feats_out]
         cap_emb = list(cap_emb.split(cap_item_seqlens, dim=0))
         
-        cap_pos_ids_cat = torch.cat(cap_pos_ids, dim=0)
-        # EmbedND expects [batch, seq, axes], so add batch dim and then extract
-        cap_freqs_cis = self.rope_embedder(cap_pos_ids_cat.unsqueeze(0))[0]
-        cap_freqs_cis = list(cap_freqs_cis.split(cap_item_seqlens, dim=0))
+        # RoPE - process each batch item separately
+        cap_freqs_cis = []
+        for pos_ids in cap_pos_ids:
+            # EmbedND expects [batch, seq, axes]
+            freqs = self.rope_embedder(pos_ids.unsqueeze(0))[0]
+            cap_freqs_cis.append(freqs)
         
         cap_emb_padded = pad_sequence(cap_emb, batch_first=True, padding_value=0.0)
         cap_freqs_cis_padded = pad_sequence(cap_freqs_cis, batch_first=True, padding_value=0.0)

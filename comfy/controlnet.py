@@ -617,7 +617,7 @@ def load_controlnet_z_image(sd, model_options={}):
         "n_heads": 30,
         "n_kv_heads": 30,
         "multiple_of": 256,
-        "ffn_dim_multiplier": 4.0,
+        "ffn_dim_multiplier": 4.0,  # Will be overridden by detection
         "norm_eps": 1e-5,
         "qk_norm": True,
         "cap_feat_dim": 2560,
@@ -628,6 +628,25 @@ def load_controlnet_z_image(sd, model_options={}):
         "time_scale": 1000.0,
         "pad_tokens_multiple": 32,
     }
+    
+    # Detect the correct ffn_dim_multiplier from checkpoint
+    dim = z_image_config["dim"]
+    multiple_of = z_image_config["multiple_of"]
+    
+    # Find a control layer feed forward weight to detect hidden_dim
+    control_ff_key = None
+    for key in sd.keys():
+        if key.startswith("control_layers.") and "feed_forward.w1.weight" in key:
+            control_ff_key = key
+            break
+    
+    if control_ff_key:
+        hidden_dim = sd[control_ff_key].shape[0]  # w1.weight is [hidden_dim, dim]
+        # Calculate ffn_dim_multiplier: hidden_dim = int((dim * ffn_dim_multiplier) / multiple_of) * multiple_of
+        # So ffn_dim_multiplier = hidden_dim / dim (approximately)
+        detected_ffn_multiplier = hidden_dim / dim
+        z_image_config["ffn_dim_multiplier"] = detected_ffn_multiplier
+        logging.info(f"Z-Image ControlNet detected ffn_dim_multiplier: {detected_ffn_multiplier}")
     
     unet_dtype = model_options.get("dtype", None)
     if unet_dtype is None:

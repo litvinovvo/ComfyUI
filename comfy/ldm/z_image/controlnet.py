@@ -181,8 +181,15 @@ class ZSingleStreamAttnProcessor:
         if attn.norm_k is not None:
             key = attn.norm_k(key)
 
+        # Apply RoPE - Flux apply_rope expects [batch, heads, seq_len, head_dim]
         if freqs_cis is not None:
+            # Transpose from [batch, seq_len, heads, head_dim] to [batch, heads, seq_len, head_dim]
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
             query, key = apply_rope(query, key, freqs_cis)
+            # Transpose back to [batch, seq_len, heads, head_dim]
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
 
         # Cast to correct dtype
         dtype = query.dtype

@@ -182,8 +182,7 @@ class ZSingleStreamAttnProcessor:
             key = attn.norm_k(key)
 
         if freqs_cis is not None:
-            query = apply_rope(query, freqs_cis)
-            key = apply_rope(key, freqs_cis)
+            query, key = apply_rope(query, key, freqs_cis)
 
         # Cast to correct dtype
         dtype = query.dtype

@@ -238,8 +238,11 @@ class ZImageControlTransformer2DModel(nn.Module):
             control_out = control_layer.after_proj(control_embed)
             control_outputs.append(control_out)
 
-        # Map control outputs to main model layers
-        # Control hints are applied at specific layer positions
+        # Map control outputs to main model layers.
+        # Control hints are applied at specific layer positions (control_layers_places).
+        # For layers between control points, we repeat the previous control output to
+        # provide continuous guidance. This follows the VideoX-Fun implementation where
+        # control signals interpolate between control points.
         out_input = []
         control_idx = 0
         for layer_idx in range(self.main_model_layers):
@@ -247,7 +250,7 @@ class ZImageControlTransformer2DModel(nn.Module):
                 out_input.append(control_outputs[control_idx])
                 control_idx += 1
             else:
-                # For layers without control, we can either skip or repeat the last control
+                # Repeat previous control for layers between control points
                 if control_idx > 0:
                     out_input.append(control_outputs[control_idx - 1])
                 else:

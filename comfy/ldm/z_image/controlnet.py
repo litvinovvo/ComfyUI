@@ -603,7 +603,9 @@ class ZImageControlNet(nn.Module):
         
         # RoPE
         x_pos_ids_cat = torch.cat(x_pos_ids, dim=0)
-        x_freqs_cis = list(self.rope_embedder(x_pos_ids_cat).split(x_item_seqlens, dim=0))
+        # EmbedND expects [batch, seq, axes], so add batch dim
+        x_freqs_cis = self.rope_embedder(x_pos_ids_cat.unsqueeze(0)).squeeze(0)
+        x_freqs_cis = list(x_freqs_cis.split(x_item_seqlens, dim=0))
         
         # Pad sequence
         x_emb_padded = pad_sequence(x_emb, batch_first=True, padding_value=0.0)
@@ -629,7 +631,9 @@ class ZImageControlNet(nn.Module):
         cap_emb = list(cap_emb.split(cap_item_seqlens, dim=0))
         
         cap_pos_ids_cat = torch.cat(cap_pos_ids, dim=0)
-        cap_freqs_cis = list(self.rope_embedder(cap_pos_ids_cat).split(cap_item_seqlens, dim=0))
+        # EmbedND expects [batch, seq, axes], so add batch dim
+        cap_freqs_cis = self.rope_embedder(cap_pos_ids_cat.unsqueeze(0)).squeeze(0)
+        cap_freqs_cis = list(cap_freqs_cis.split(cap_item_seqlens, dim=0))
         
         cap_emb_padded = pad_sequence(cap_emb, batch_first=True, padding_value=0.0)
         cap_freqs_cis_padded = pad_sequence(cap_freqs_cis, batch_first=True, padding_value=0.0)

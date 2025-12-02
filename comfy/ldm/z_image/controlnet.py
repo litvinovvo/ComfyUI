@@ -597,6 +597,7 @@ class ZImageControlNet(nn.Module):
         x_emb = self.all_x_embedder[f"{patch_size}-{f_patch_size}"](x_cat)
         
         # Add pad token
+        x_item_seqlens = [len(_) for _ in x_patches]
         x_emb[torch.cat(x_inner_pad_mask)] = self.x_pad_token
         x_emb = list(x_emb.split(x_item_seqlens, dim=0))
         

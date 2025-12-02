@@ -38,6 +38,7 @@ import comfy.ldm.hydit.controlnet
 import comfy.ldm.flux.controlnet
 import comfy.ldm.qwen_image.controlnet
 import comfy.cldm.dit_embedder
+import comfy.ldm.z_image.controlnet
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from comfy.hooks import HookGroup
@@ -608,6 +609,35 @@ def load_controlnet_qwen_instantx(sd, model_options={}):
 def convert_mistoline(sd):
     return comfy.utils.state_dict_prefix_replace(sd, {"single_controlnet_blocks.": "controlnet_single_blocks."})
 
+def load_controlnet_z_image(state_dict, model_options={}):
+    unet_dtype = model_options.get("dtype", None)
+    if unet_dtype is None:
+        weight_dtype = comfy.utils.weight_dtype(state_dict)
+        unet_dtype = comfy.model_management.unet_dtype(model_params=-1, supported_dtypes=[weight_dtype], weight_dtype=weight_dtype)
+
+    load_device = comfy.model_management.get_torch_device()
+    manual_cast_dtype = comfy.model_management.unet_manual_cast(unet_dtype, load_device)
+    
+    dim = state_dict['control_layers.0.attention.to_q.weight'].shape[0]
+    
+    # Detect ffn_dim_multiplier from checkpoint weights
+    ffn_dim_multiplier = 1.0
+    if 'control_layers.0.feed_forward.w1.weight' in state_dict:
+        hidden_dim = state_dict['control_layers.0.feed_forward.w1.weight'].shape[0]
+        ffn_dim_multiplier = hidden_dim / dim
+    
+    control_model = comfy.ldm.z_image.controlnet.ZImageControlNet(
+        dim=dim,
+        ffn_dim_multiplier=ffn_dim_multiplier,
+        device=comfy.model_management.unet_offload_device(),
+        dtype=unet_dtype
+    )
+    
+    control_model.load_state_dict(state_dict, strict=False)
+    
+    control = ControlNet(control_model, load_device=load_device, manual_cast_dtype=manual_cast_dtype)
+    return control
+
 
 def load_controlnet_state_dict(state_dict, model=None, model_options={}):
     controlnet_data = state_dict
@@ -682,6 +712,8 @@ def load_controlnet_state_dict(state_dict, model=None, model_options={}):
             return load_controlnet_qwen_instantx(controlnet_data, model_options=model_options)
         elif "controlnet_x_embedder.weight" in controlnet_data:
             return load_controlnet_flux_instantx(controlnet_data, model_options=model_options)
+    elif "control_layers.0.attention.to_q.weight" in controlnet_data:
+        return load_controlnet_z_image(controlnet_data, model_options=model_options)
 
     elif "controlnet_blocks.0.linear.weight" in controlnet_data: #mistoline flux
         return load_controlnet_flux_xlabs_mistoline(convert_mistoline(controlnet_data), mistoline=True, model_options=model_options)

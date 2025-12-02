@@ -629,12 +629,16 @@ def load_controlnet_z_image(sd, model_options={}):
     n_kv_heads = 30
     control_layers_interval = 2
 
-    # Count control layers to determine configuration
-    control_layer_count = 0
+    # Count control layers from checkpoint
+    num_control_layers = 0
     for key in sd.keys():
         if key.startswith("control_layers.") and ".after_proj." in key:
             idx = int(key.split(".")[1])
-            control_layer_count = max(control_layer_count, idx + 1)
+            num_control_layers = max(num_control_layers, idx + 1)
+
+    # Default to 15 if not detected
+    if num_control_layers == 0:
+        num_control_layers = 15
 
     control_model = comfy.ldm.z_image.controlnet.ZImageControlTransformer2DModel(
         patch_size=2,
@@ -654,6 +658,7 @@ def load_controlnet_z_image(sd, model_options={}):
         rope_theta=256.0,
         time_scale=1000.0,
         control_layers_interval=control_layers_interval,
+        num_control_layers=num_control_layers,
         device=offload_device,
         dtype=unet_dtype,
         operations=operations,

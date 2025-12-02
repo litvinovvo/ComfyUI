@@ -14,65 +14,42 @@ from comfy.ldm.modules.diffusionmodules.mmdit import TimestepEmbedder
 from comfy.ldm.flux.layers import EmbedND
 
 
-class ZImageControlTransformerBlock(JointTransformerBlock):
+class ZImageControlProjection(nn.Module):
     """
-    A transformer block with control projections.
-    Extends JointTransformerBlock with before_proj and after_proj for control signals.
+    Control projection layer for Z-Image ControlNet.
+    Each control layer has a before_proj (only for first block) and after_proj.
+    These project the control signal to be added to the main model's hidden states.
     """
 
     def __init__(
         self,
-        layer_id: int,
         dim: int,
-        n_heads: int,
-        n_kv_heads: int,
-        multiple_of: int,
-        ffn_dim_multiplier: float,
-        norm_eps: float,
-        qk_norm: bool,
         block_id: int = 0,
-        z_image_modulation: bool = True,
-        operation_settings: dict = {},
+        device=None,
+        dtype=None,
+        operations=None,
     ) -> None:
-        super().__init__(
-            layer_id=layer_id,
-            dim=dim,
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            multiple_of=multiple_of,
-            ffn_dim_multiplier=ffn_dim_multiplier,
-            norm_eps=norm_eps,
-            qk_norm=qk_norm,
-            modulation=True,
-            z_image_modulation=z_image_modulation,
-            attn_out_bias=False,
-            operation_settings=operation_settings,
-        )
+        super().__init__()
         self.block_id = block_id
+        self.dim = dim
 
-        # Control projections - initialized to zero for residual learning
+        # First block has before_proj to process the initial control embedding
         if block_id == 0:
-            self.before_proj = operation_settings.get("operations").Linear(
-                dim,
-                dim,
-                bias=True,
-                device=operation_settings.get("device"),
-                dtype=operation_settings.get("dtype"),
+            self.before_proj = operations.Linear(
+                dim, dim, bias=True, device=device, dtype=dtype
             )
 
-        self.after_proj = operation_settings.get("operations").Linear(
-            dim,
-            dim,
-            bias=True,
-            device=operation_settings.get("device"),
-            dtype=operation_settings.get("dtype"),
+        # Every block has after_proj to output the control signal
+        self.after_proj = operations.Linear(
+            dim, dim, bias=True, device=device, dtype=dtype
         )
 
 
 class ZImageControlTransformer2DModel(nn.Module):
     """
     Z-Image ControlNet Transformer model.
-    Extends the base Z-Image transformer with control layers.
+    This is a lightweight control model that processes control images and produces
+    control signals to be added to the main Z-Image transformer at specific layers.
     """
 
     def __init__(
@@ -94,6 +71,7 @@ class ZImageControlTransformer2DModel(nn.Module):
         rope_theta: float = 256.0,
         time_scale: float = 1000.0,
         control_layers_interval: int = 2,
+        num_control_layers: int = 15,
         image_model: str = None,
         device=None,
         dtype=None,
@@ -109,12 +87,12 @@ class ZImageControlTransformer2DModel(nn.Module):
         self.dim = dim
         self.n_heads = n_heads
         self.n_layers = n_layers
+        self.num_control_layers = num_control_layers
 
-        # Calculate control layer positions (every N layers)
-        self.control_layers_places = [i for i in range(0, n_layers, control_layers_interval)]
-        self.num_control_layers = len(self.control_layers_places)
+        # Control layer positions (every N layers) - for mapping outputs
+        self.control_layers_places = [i for i in range(0, n_layers, control_layers_interval)][:num_control_layers]
 
-        # Control input embedder
+        # Control input embedder - named to match checkpoint
         self.control_x_embedder = operations.Linear(
             in_features=patch_size * patch_size * in_channels,
             out_features=dim,
@@ -123,7 +101,7 @@ class ZImageControlTransformer2DModel(nn.Module):
             dtype=dtype,
         )
 
-        # Control noise refiner (process control latents)
+        # Control noise refiner - processes control latents before projection
         self.control_noise_refiner = nn.ModuleList(
             [
                 JointTransformerBlock(
@@ -143,21 +121,15 @@ class ZImageControlTransformer2DModel(nn.Module):
             ]
         )
 
-        # Control transformer blocks
+        # Control projection layers - just before_proj/after_proj, not full transformer blocks
         self.control_layers = nn.ModuleList(
             [
-                ZImageControlTransformerBlock(
-                    layer_id=self.control_layers_places[i],
+                ZImageControlProjection(
                     dim=dim,
-                    n_heads=n_heads,
-                    n_kv_heads=n_kv_heads,
-                    multiple_of=multiple_of,
-                    ffn_dim_multiplier=ffn_dim_multiplier,
-                    norm_eps=norm_eps,
-                    qk_norm=qk_norm,
                     block_id=i,
-                    z_image_modulation=True,
-                    operation_settings=operation_settings,
+                    device=device,
+                    dtype=dtype,
+                    operations=operations,
                 )
                 for i in range(self.num_control_layers)
             ]
@@ -224,25 +196,19 @@ class ZImageControlTransformer2DModel(nn.Module):
         for layer in self.control_noise_refiner:
             control_embed = layer(control_embed, None, freqs_cis, t_emb, transformer_options=transformer_options)
 
-        # Generate control hints through control layers
+        # Generate control hints through control projection layers
         control_outputs = []
         for i, control_layer in enumerate(self.control_layers):
             # Apply before_proj for first block
             if i == 0 and hasattr(control_layer, 'before_proj'):
                 control_embed = control_layer.before_proj(control_embed)
 
-            # Forward through the control block
-            control_embed = control_layer(control_embed, None, freqs_cis, t_emb, transformer_options=transformer_options)
-
             # Get control output through after_proj
             control_out = control_layer.after_proj(control_embed)
             control_outputs.append(control_out)
 
         # Map control outputs to main model layers.
-        # Control hints are applied at specific layer positions (control_layers_places).
-        # For layers between control points, we repeat the previous control output to
-        # provide continuous guidance. This follows the VideoX-Fun implementation where
-        # control signals interpolate between control points.
+        # Control hints are applied at specific layer positions.
         out_input = []
         control_idx = 0
         for layer_idx in range(self.main_model_layers):
@@ -250,7 +216,7 @@ class ZImageControlTransformer2DModel(nn.Module):
                 out_input.append(control_outputs[control_idx])
                 control_idx += 1
             else:
-                # Repeat previous control for layers between control points
+                # For layers between control points, repeat the previous control
                 if control_idx > 0:
                     out_input.append(control_outputs[control_idx - 1])
                 else:

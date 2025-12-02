@@ -660,7 +660,8 @@ class ZImageControlNet(nn.Module):
             
             # Main Unified
             unified.append(torch.cat([x_emb_padded[i][:x_len], cap_emb_padded[i][:cap_len]]))
-            unified_freqs_cis.append(torch.cat([x_freqs_cis_padded[i][:x_len], cap_freqs_cis_padded[i][:cap_len]]))
+            # freqs_cis has shape [batch, 1, seq, ...], so index correctly
+            unified_freqs_cis.append(torch.cat([x_freqs_cis_padded[i, :, :x_len], cap_freqs_cis_padded[i, :, :cap_len]], dim=1))
             
             # Control Unified
             if hint_emb is not None:

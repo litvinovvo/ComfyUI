@@ -359,6 +359,7 @@ class ZImageControlNet(nn.Module):
         axes_dims=[32, 48, 48],
         axes_lens=[1024, 512, 512],
         control_layers_count=2,
+        control_in_dim=None,
         ffn_dim_multiplier=1.0,
         device=None,
         dtype=None,
@@ -370,6 +371,7 @@ class ZImageControlNet(nn.Module):
         self.all_f_patch_size = all_f_patch_size
         self.dim = dim
         self.n_heads = n_heads
+        self.control_in_dim = in_channels if control_in_dim is None else control_in_dim
 
         self.rope_theta = rope_theta
         self.t_scale = t_scale
@@ -397,6 +399,14 @@ class ZImageControlNet(nn.Module):
             all_x_embedder[f"{patch_size}-{f_patch_size}"] = x_embedder
 
         self.all_x_embedder = nn.ModuleDict(all_x_embedder)
+        
+        # Control patch embeddings (separate from main embedder to support different input dims)
+        control_all_x_embedder = {}
+        for patch_idx, (patch_size, f_patch_size) in enumerate(zip(all_patch_size, all_f_patch_size)):
+            control_x_embedder = nn.Linear(f_patch_size * patch_size * patch_size * self.control_in_dim, dim, bias=True)
+            control_all_x_embedder[f"{patch_size}-{f_patch_size}"] = control_x_embedder
+
+        self.control_all_x_embedder = nn.ModuleDict(control_all_x_embedder)
         
         self.noise_refiner = nn.ModuleList(
             [
@@ -572,18 +582,9 @@ class ZImageControlNet(nn.Module):
             hint_patches, _, _, _, _, _, _ = \
                 self.patchify_and_embed(hint_list, cap_feats, patch_size, f_patch_size) # cap_feats reused just for sizing?
             
-            # Embed hint
-            # Hint needs to be embedded same as x?
-            # In VideoX-Fun: "control_latents = self.vae.encode(control_image)..."
-            # "control_context = control_latents.unsqueeze(2)" ??
-            # Then "control_context_unified.append(torch.cat([control_context[i][:x_len], cap_feats[i][:cap_len]]))"
-            
-            # So control input is also embedded via x_embedder?
-            # "x = self.all_x_embedder... (x)"
-            # We should probably embed hint similarly.
-            
+            # Embed hint using control embedder
             hint_cat = torch.cat(hint_patches, dim=0)
-            hint_emb = self.all_x_embedder[f"{patch_size}-{f_patch_size}"](hint_cat)
+            hint_emb = self.control_all_x_embedder[f"{patch_size}-{f_patch_size}"](hint_cat)
             
             # Split back
             x_item_seqlens = [len(_) for _ in x_patches]

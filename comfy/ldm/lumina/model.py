@@ -556,15 +556,15 @@ class NextDiT(nn.Module):
         l_effective_cap_len = [cap_feats.shape[1]] * bsz
         return padded_full_embed, mask, img_sizes, l_effective_cap_len, freqs_cis
 
-    def forward(self, x, timesteps, context, num_tokens, attention_mask=None, **kwargs):
+    def forward(self, x, timesteps, context, num_tokens, attention_mask=None, control=None, **kwargs):
         return comfy.patcher_extension.WrapperExecutor.new_class_executor(
             self._forward,
             self,
             comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, kwargs.get("transformer_options", {}))
-        ).execute(x, timesteps, context, num_tokens, attention_mask, **kwargs)
+        ).execute(x, timesteps, context, num_tokens, attention_mask, control, **kwargs)
 
     # def forward(self, x, t, cap_feats, cap_mask):
-    def _forward(self, x, timesteps, context, num_tokens, attention_mask=None, **kwargs):
+    def _forward(self, x, timesteps, context, num_tokens, attention_mask=None, control=None, **kwargs):
         t = 1.0 - timesteps
         cap_feats = context
         cap_mask = attention_mask
@@ -586,8 +586,30 @@ class NextDiT(nn.Module):
         x, mask, img_size, cap_size, freqs_cis = self.patchify_and_embed(x, cap_feats, cap_mask, t, num_tokens, transformer_options=transformer_options)
         freqs_cis = freqs_cis.to(x.device)
 
-        for layer in self.layers:
+        # Get control hints if available
+        control_input = None
+        if control is not None:
+            control_input = control.get("input", None)
+
+        # cap_size contains the caption token lengths per batch item
+        # Control hints should only be applied to image tokens (after caption tokens)
+        cap_len = cap_size[0] if cap_size else 0
+
+        for i, layer in enumerate(self.layers):
             x = layer(x, mask, freqs_cis, adaln_input, transformer_options=transformer_options)
+            # Apply control hints after each layer - only to image tokens
+            if control_input is not None and i < len(control_input):
+                ctrl = control_input[i]
+                if ctrl is not None:
+                    # Only add control to the image portion (after caption tokens)
+                    # x shape: [B, cap_len + img_tokens, D]
+                    # ctrl shape: [B, img_tokens, D]
+                    img_tokens = x.shape[1] - cap_len
+                    if ctrl.shape[1] == img_tokens:
+                        x[:, cap_len:, :] = x[:, cap_len:, :] + ctrl
+                    elif ctrl.shape[1] < img_tokens:
+                        # Control has fewer tokens, apply to available portion
+                        x[:, cap_len:cap_len + ctrl.shape[1], :] = x[:, cap_len:cap_len + ctrl.shape[1], :] + ctrl
 
         x = self.final_layer(x, adaln_input)
         x = self.unpatchify(x, img_size, cap_size, return_tensor=x_is_tensor)[:,:,:h,:w]

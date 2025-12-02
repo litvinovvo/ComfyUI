@@ -586,9 +586,9 @@ class ZImageControlNet(nn.Module):
             hint_cat = torch.cat(hint_patches, dim=0)
             hint_emb = self.control_all_x_embedder[f"{patch_size}-{f_patch_size}"](hint_cat)
             
-            # Split back
-            x_item_seqlens = [len(_) for _ in x_patches]
-            hint_emb = list(hint_emb.split(x_item_seqlens, dim=0))
+            # Split back - use hint's sequence lengths, not x's
+            hint_item_seqlens = [len(_) for _ in hint_patches]
+            hint_emb = list(hint_emb.split(hint_item_seqlens, dim=0))
         else:
             hint_emb = None
 

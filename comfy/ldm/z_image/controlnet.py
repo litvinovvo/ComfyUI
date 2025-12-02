@@ -167,10 +167,13 @@ class ZSingleStreamAttnProcessor:
         attention_mask: Optional[torch.Tensor] = None,
         freqs_cis: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        from comfy.ldm.flux.math import attention as flux_attention, apply_rope
+        
         query = attn.to_q(hidden_states)
         key = attn.to_k(hidden_states)
         value = attn.to_v(hidden_states)
 
+        # Reshape to [batch, seq, heads, head_dim]
         query = query.unflatten(-1, (attn.heads, -1))
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
@@ -181,48 +184,17 @@ class ZSingleStreamAttnProcessor:
         if attn.norm_k is not None:
             key = attn.norm_k(key)
 
-        # Apply RoPE - Flux apply_rope expects [batch, heads, seq_len, head_dim]
-        if freqs_cis is not None:
-            # Transpose from [batch, seq_len, heads, head_dim] to [batch, heads, seq_len, head_dim]
-            query = query.transpose(1, 2)
-            key = key.transpose(1, 2)
-            query, key = apply_rope(query, key, freqs_cis)
-            # Transpose back to [batch, seq_len, heads, head_dim]
-            query = query.transpose(1, 2)
-            key = key.transpose(1, 2)
-
-        # Cast to correct dtype
-        dtype = query.dtype
-        query, key = query.to(dtype), key.to(dtype)
-
-        # Prepare attention mask for SDPA
-        if attention_mask is not None:
-            # attention_mask: [batch, seq_len] bool, True for valid positions
-            # Convert to [batch, seq_len, seq_len] float with 0 for attend, -inf for mask
-            attention_mask = attention_mask.unsqueeze(1) * attention_mask.unsqueeze(2)  # [batch, seq_len, seq_len] bool
-            attention_mask = torch.where(attention_mask, 0.0, -float('inf')).to(dtype)  # [batch, seq_len, seq_len] float
-            # Expand to [batch, heads, seq_len, seq_len] for SDPA
-            attention_mask = attention_mask.unsqueeze(1).expand(-1, attn.heads, -1, -1)
-
-        # Scaled Dot Product Attention
-        # After RoPE transpose back, we have [batch, seq, heads, head_dim]
-        # SDPA expects [batch, heads, seq, head_dim], so transpose
-        query = query.transpose(1, 2)  # [batch, heads, seq, head_dim]
+        # Transpose to [batch, heads, seq, head_dim] for Flux attention
+        query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
-        hidden_states = F.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_causal=False
-        )
+        # Use Flux's attention function which handles RoPE internally
+        # freqs_cis should have shape [batch, 1, seq, rope_dim, 2, 2] from EmbedND
+        hidden_states = flux_attention(query, key, value, pe=freqs_cis, mask=attention_mask)
 
         # Reshape back: [batch, heads, seq, head_dim] -> [batch, seq, heads*head_dim]
         hidden_states = hidden_states.transpose(1, 2).contiguous().view(hidden_states.shape[0], hidden_states.shape[2], -1)
-        hidden_states = hidden_states.to(dtype)
 
         output = attn.to_out[0](hidden_states)
         if len(attn.to_out) > 1:  # dropout
@@ -606,8 +578,6 @@ class ZImageControlNet(nn.Module):
         # Pad sequence
         x_emb_padded = pad_sequence(x_emb, batch_first=True, padding_value=0.0)
         x_freqs_cis_padded = pad_sequence(x_freqs_cis, batch_first=True, padding_value=0.0)
-        # Add heads dimension for broadcasting: [batch, seq, rope_dim, 2, 2] -> [batch, 1, seq, rope_dim, 2, 2]
-        x_freqs_cis_padded = x_freqs_cis_padded.unsqueeze(1)
         
         # Attention mask
         bsz = len(x_list)
@@ -637,8 +607,6 @@ class ZImageControlNet(nn.Module):
         
         cap_emb_padded = pad_sequence(cap_emb, batch_first=True, padding_value=0.0)
         cap_freqs_cis_padded = pad_sequence(cap_freqs_cis, batch_first=True, padding_value=0.0)
-        # Add heads dimension for broadcasting: [batch, seq, rope_dim, 2, 2] -> [batch, 1, seq, rope_dim, 2, 2]
-        cap_freqs_cis_padded = cap_freqs_cis_padded.unsqueeze(1)
         
         cap_max_item_seqlen = max(cap_item_seqlens)
         cap_attn_mask = torch.zeros((bsz, cap_max_item_seqlen), dtype=torch.bool, device=x.device)
@@ -660,7 +628,7 @@ class ZImageControlNet(nn.Module):
             
             # Main Unified
             unified.append(torch.cat([x_emb_padded[i][:x_len], cap_emb_padded[i][:cap_len]]))
-            # freqs_cis has shape [batch, 1, seq, ...], so index correctly
+            # freqs_cis already has heads dim [1, seq, ...] from EmbedND, concat on seq dimension
             unified_freqs_cis.append(torch.cat([x_freqs_cis_padded[i, :, :x_len], cap_freqs_cis_padded[i, :, :cap_len]], dim=1))
             
             # Control Unified

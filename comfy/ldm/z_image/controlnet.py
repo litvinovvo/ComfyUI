@@ -443,6 +443,9 @@ class ZImageControlNet(nn.Module):
 
         self.rope_embedder = EmbedND(dim=head_dim, theta=rope_theta, axes_dim=axes_dims)
 
+        self.device = device
+        self.dtype = dtype
+
         if device:
             self.to(device)
         if dtype:

@@ -38,6 +38,7 @@ import comfy.ldm.hydit.controlnet
 import comfy.ldm.flux.controlnet
 import comfy.ldm.qwen_image.controlnet
 import comfy.cldm.dit_embedder
+import comfy.ldm.z_image.controlnet
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from comfy.hooks import HookGroup
@@ -605,8 +606,24 @@ def load_controlnet_qwen_instantx(sd, model_options={}):
     control = ControlNet(control_model, compression_ratio=1, latent_format=latent_format, concat_mask=concat_mask, load_device=load_device, manual_cast_dtype=manual_cast_dtype, extra_conds=extra_conds)
     return control
 
-def convert_mistoline(sd):
-    return comfy.utils.state_dict_prefix_replace(sd, {"single_controlnet_blocks.": "controlnet_single_blocks."})
+def load_controlnet_z_image(sd, model_options={}):
+    model_config, operations, load_device, unet_dtype, manual_cast_dtype, offload_device = controlnet_config(sd, model_options=model_options)
+    
+    # Determine control latent channels from the control_all_x_embedder
+    control_latent_channels = sd.get("control_all_x_embedder.2-1.weight").shape[1] if "control_all_x_embedder.2-1.weight" in sd else 64
+    
+    control_model = comfy.ldm.z_image.controlnet.ZImageControlTransformer2DModel(
+        operations=operations, 
+        device=offload_device, 
+        dtype=unet_dtype, 
+        **model_config.unet_config
+    )
+    control_model = controlnet_load_state_dict(control_model, sd)
+    
+    latent_format = comfy.latent_formats.Flux()
+    extra_conds = []
+    control = ControlNet(control_model, compression_ratio=1, latent_format=latent_format, load_device=load_device, manual_cast_dtype=manual_cast_dtype, extra_conds=extra_conds)
+    return control
 
 
 def load_controlnet_state_dict(state_dict, model=None, model_options={}):
@@ -682,6 +699,9 @@ def load_controlnet_state_dict(state_dict, model=None, model_options={}):
             return load_controlnet_qwen_instantx(controlnet_data, model_options=model_options)
         elif "controlnet_x_embedder.weight" in controlnet_data:
             return load_controlnet_flux_instantx(controlnet_data, model_options=model_options)
+        elif "control_all_x_embedder.2-1.weight" in controlnet_data or "control_all_x_embedder.2-1.bias" in controlnet_data:
+            # Heuristic: Z-Image ControlNet uses control_all_x_embedder with keys like 'control_all_x_embedder.2-1.weight'
+            return load_controlnet_z_image(controlnet_data, model_options=model_options)
 
     elif "controlnet_blocks.0.linear.weight" in controlnet_data: #mistoline flux
         return load_controlnet_flux_xlabs_mistoline(convert_mistoline(controlnet_data), mistoline=True, model_options=model_options)

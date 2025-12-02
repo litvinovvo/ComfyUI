@@ -617,6 +617,8 @@ class ZImageControlNet(nn.Module):
         # Pad sequence
         x_emb_padded = pad_sequence(x_emb, batch_first=True, padding_value=0.0)
         x_freqs_cis_padded = pad_sequence(x_freqs_cis, batch_first=True, padding_value=0.0)
+        # Add heads dimension for broadcasting: [batch, seq, rope_dim, 2, 2] -> [batch, 1, seq, rope_dim, 2, 2]
+        x_freqs_cis_padded = x_freqs_cis_padded.unsqueeze(1)
         
         # Attention mask
         bsz = len(x_list)
@@ -646,6 +648,8 @@ class ZImageControlNet(nn.Module):
         
         cap_emb_padded = pad_sequence(cap_emb, batch_first=True, padding_value=0.0)
         cap_freqs_cis_padded = pad_sequence(cap_freqs_cis, batch_first=True, padding_value=0.0)
+        # Add heads dimension for broadcasting: [batch, seq, rope_dim, 2, 2] -> [batch, 1, seq, rope_dim, 2, 2]
+        cap_freqs_cis_padded = cap_freqs_cis_padded.unsqueeze(1)
         
         cap_max_item_seqlen = max(cap_item_seqlens)
         cap_attn_mask = torch.zeros((bsz, cap_max_item_seqlen), dtype=torch.bool, device=x.device)

@@ -607,16 +607,46 @@ def load_controlnet_qwen_instantx(sd, model_options={}):
     return control
 
 def load_controlnet_z_image(sd, model_options={}):
-    model_config, operations, load_device, unet_dtype, manual_cast_dtype, offload_device = controlnet_config(sd, model_options=model_options)
+    # Z-Image specific parameters based on the VideoX-Fun implementation
+    z_image_config = {
+        "patch_size": 2,
+        "in_channels": 16,  # latent channels
+        "dim": 3840,
+        "n_layers": 30,
+        "n_refiner_layers": 2,
+        "n_heads": 30,
+        "n_kv_heads": 30,
+        "multiple_of": 256,
+        "ffn_dim_multiplier": 4.0,
+        "norm_eps": 1e-5,
+        "qk_norm": True,
+        "cap_feat_dim": 2560,
+        "axes_dims": [32, 48, 48],
+        "axes_lens": [1024, 512, 512],
+        "rope_theta": 256.0,
+        "z_image_modulation": True,
+        "time_scale": 1000.0,
+        "pad_tokens_multiple": 32,
+    }
     
-    # Determine control latent channels from the control_all_x_embedder
-    control_latent_channels = sd.get("control_all_x_embedder.2-1.weight").shape[1] if "control_all_x_embedder.2-1.weight" in sd else 64
+    unet_dtype = model_options.get("dtype", None)
+    if unet_dtype is None:
+        weight_dtype = comfy.utils.weight_dtype(sd)
+        unet_dtype = comfy.model_management.unet_dtype(model_params=-1, supported_dtypes=[torch.float16, torch.bfloat16, torch.float32], weight_dtype=weight_dtype)
+
+    load_device = comfy.model_management.get_torch_device()
+    manual_cast_dtype = comfy.model_management.unet_manual_cast(unet_dtype, load_device)
+    operations = model_options.get("custom_operations", None)
+    if operations is None:
+        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype)
+
+    offload_device = comfy.model_management.unet_offload_device()
     
     control_model = comfy.ldm.z_image.controlnet.ZImageControlTransformer2DModel(
         operations=operations, 
         device=offload_device, 
         dtype=unet_dtype, 
-        **model_config.unet_config
+        **z_image_config
     )
     control_model = controlnet_load_state_dict(control_model, sd)
     
@@ -687,6 +717,9 @@ def load_controlnet_state_dict(state_dict, model=None, model_options={}):
         if len(leftover_keys) > 0:
             logging.warning("leftover keys: {}".format(leftover_keys))
         controlnet_data = new_sd
+    elif any(k.startswith("control_all_x_embedder") for k in controlnet_data):
+        # Heuristic: Z-Image ControlNet uses control_all_x_embedder ModuleDict
+        return load_controlnet_z_image(controlnet_data, model_options=model_options)
     elif "controlnet_blocks.0.weight" in controlnet_data:
         if "double_blocks.0.img_attn.norm.key_norm.scale" in controlnet_data:
             return load_controlnet_flux_xlabs_mistoline(controlnet_data, model_options=model_options)
@@ -699,8 +732,8 @@ def load_controlnet_state_dict(state_dict, model=None, model_options={}):
             return load_controlnet_qwen_instantx(controlnet_data, model_options=model_options)
         elif "controlnet_x_embedder.weight" in controlnet_data:
             return load_controlnet_flux_instantx(controlnet_data, model_options=model_options)
-        elif "control_all_x_embedder.2-1.weight" in controlnet_data or "control_all_x_embedder.2-1.bias" in controlnet_data:
-            # Heuristic: Z-Image ControlNet uses control_all_x_embedder with keys like 'control_all_x_embedder.2-1.weight'
+        elif any(k.startswith("control_all_x_embedder") for k in controlnet_data):
+            # Heuristic: Z-Image ControlNet uses control_all_x_embedder ModuleDict
             return load_controlnet_z_image(controlnet_data, model_options=model_options)
 
     elif "controlnet_blocks.0.linear.weight" in controlnet_data: #mistoline flux
